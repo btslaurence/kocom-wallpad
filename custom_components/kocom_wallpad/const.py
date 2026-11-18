@@ -69,3 +69,9 @@ class SubType(IntEnum):
     VOC = 9
     TEMP = 10
     HUMIDITY = 11
+
+
+# Device types that are asked for their state (0x3A) when a connection starts
+# until their own live report arrives. Lights are deliberately excluded: their
+# command path is linked to the entrance cutoff side effect on some models.
+STATUS_QUERY_DEVICE_TYPES = frozenset({DeviceType.THERMOSTAT, DeviceType.VENTILATION})

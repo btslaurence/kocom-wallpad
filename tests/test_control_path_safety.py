@@ -350,6 +350,24 @@ class ControllerSafetyTests(unittest.TestCase):
             living_packet,
         )
 
+    def test_ventilation_status_query_has_exact_directed_frame_and_checksum(self):
+        controller = KocomController(_ControllerGateway())
+        key = DeviceKey(DeviceType.VENTILATION, 0, 0, SubType.NONE)
+
+        packet, _, _ = controller.generate_command(key, "status_query")
+
+        self.assertEqual(
+            bytes.fromhex("aa5530bc00480001003a00000000000000006f0d0d"), packet
+        )
+        self.assertEqual(0x3A, packet[9])
+        self.assertEqual(bytes(8), packet[10:18])
+        self.assertEqual(sum(packet[2:18]) % 256, packet[18])
+        with self.assertRaises(ValueError):
+            controller.generate_command(
+                DeviceKey(DeviceType.VENTILATION, 0xFF, 0, SubType.NONE),
+                "status_query",
+            )
+
     def test_status_query_and_unknown_thermostat_actions_are_rejected(self):
         controller = KocomController(_ControllerGateway())
         thermostat = DeviceKey(DeviceType.THERMOSTAT, 1, 0, SubType.NONE)
@@ -1554,6 +1572,55 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(self.gateway.is_device_state_confirmed(first_key))
         self.assertIsNone(self.gateway.registry.get(third_key))
         self.assertFalse(self.gateway.is_device_state_confirmed(third_key))
+
+    async def test_registry_fan_entry_seeds_ventilation_query(self):
+        valid = [
+            types.SimpleNamespace(entity_id="fan.kocom_hwangi_0_0", unique_id="7-0_0-0:test"),
+        ]
+        invalid = [
+            types.SimpleNamespace(entity_id="fan.thermostat_prefix", unique_id="5-0_0-0:test"),
+            types.SimpleNamespace(entity_id="climate.ventilation_prefix", unique_id="7-1_0-0:test"),
+            types.SimpleNamespace(entity_id="fan.broadcast", unique_id="7-255_0-0:test"),
+            types.SimpleNamespace(entity_id="fan.subtype", unique_id="7-0_0-3:test"),
+            types.SimpleNamespace(entity_id="binary_sensor.vent_error", unique_id="7-0_0-3:test"),
+        ]
+        await self._restore_entity_entries(
+            [*valid, *invalid],
+            {entry.entity_id: types.SimpleNamespace(extra_data=None) for entry in valid + invalid},
+        )
+
+        self.assertEqual(
+            {DeviceKey(DeviceType.VENTILATION, 0, 0, SubType.NONE)},
+            self.gateway._bootstrap_registry_keys,
+        )
+
+    async def test_bootstrap_queries_ventilation_with_thermostats(self):
+        thermostat = self._thermostat_state(1)
+        vent_key = DeviceKey(DeviceType.VENTILATION, 0, 0, SubType.NONE)
+        ventilation = DeviceState(vent_key, Platform.FAN, {}, {"state": True, "speed": 0})
+        error_code = DeviceState(
+            DeviceKey(DeviceType.VENTILATION, 0, 0, SubType.ERRCODE),
+            Platform.BINARY_SENSOR,
+            {},
+            False,
+        )
+        self.gateway._restore_mode = True
+        for state in (thermostat, ventilation, error_code):
+            self.gateway.on_device_state(state)
+        self.gateway._restore_mode = False
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+
+        self.gateway._sync_connection_availability()
+        # Neither answers, so each primary key gets SEND_RETRY_MAX first-round
+        # tries; the ventilation error-code sensor is never queried itself.
+        await self._wait_for_sent(6)
+        await self._settle()
+        self.assertEqual(
+            [bytes.fromhex("aa5530bc00360101003a00000000000000005e0d0d"),
+             bytes.fromhex("aa5530bc00480001003a00000000000000006f0d0d")] * 3,
+            self.connection.sent,
+        )
+        self.assertFalse(self.gateway.is_device_state_confirmed(vent_key))
 
     async def test_packet_and_registry_bootstrap_keys_are_deduplicated(self):
         room = 2
