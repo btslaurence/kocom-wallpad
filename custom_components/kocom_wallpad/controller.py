@@ -25,6 +25,7 @@ from .const import (
     PACKET_LEN,
     PACKET_PREFIX,
     PACKET_SUFFIX,
+    STATUS_QUERY_DEVICE_TYPES,
     DeviceType,
     SubType,
 )
@@ -871,10 +872,10 @@ class KocomController:
         data = bytearray(8)
 
         if action == "status_query":
-            if device_type != DeviceType.THERMOSTAT:
-                raise ValueError("상태 조회는 난방에서만 지원합니다")
+            if device_type not in STATUS_QUERY_DEVICE_TYPES:
+                raise ValueError("상태 조회는 난방과 환기에서만 지원합니다")
             if not 0x00 <= room_index <= 0xFE:
-                raise ValueError("상태 조회에는 실제 난방 방 번호가 필요합니다")
+                raise ValueError("상태 조회에는 실제 기기 방 번호가 필요합니다")
             command = bytes([0x3A])
         elif device_type in (DeviceType.LIGHT, DeviceType.OUTLET):
             data = self._generate_switch(key, action, data)

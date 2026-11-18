@@ -26,6 +26,7 @@ from .const import (
     RECV_POLL_SEC,
     SEND_RETRY_GAP,
     SEND_RETRY_MAX,
+    STATUS_QUERY_DEVICE_TYPES,
     THERMOSTAT_REFRESH_INTERVAL,
     THERMOSTAT_STALE_AFTER,
     DeviceType,
@@ -34,6 +35,22 @@ from .const import (
 from .controller import KocomController
 from .models import DeviceKey, DeviceState
 from .transport import AsyncConnection
+
+# Entity platform of each device type that receives a session bootstrap query.
+_BOOTSTRAP_PLATFORMS: dict[DeviceType, Platform] = {
+    DeviceType.THERMOSTAT: Platform.CLIMATE,
+    DeviceType.VENTILATION: Platform.FAN,
+}
+
+
+def _is_bootstrap_query_key(key: DeviceKey) -> bool:
+    """Return whether a key is a primary device that is asked for its state."""
+    return (
+        key.device_type in STATUS_QUERY_DEVICE_TYPES
+        and key.device_index == 0
+        and key.sub_type == SubType.NONE
+        and 0x00 <= key.room_index <= 0xFE
+    )
 
 
 @dataclass(slots=True)
@@ -383,7 +400,8 @@ class KocomGateway:
             await self._async_refresh_stale_thermostats()
 
     def _schedule_bootstrap_queries(self) -> None:
-        """Start one query task per socket session for every known primary thermostat."""
+        """Start one query task per socket session for every known primary
+        thermostat and ventilation unit."""
         generation = self._connection_generation
         if self._bootstrap_scheduled_generation == generation:
             return
@@ -393,15 +411,11 @@ class KocomGateway:
             key.key: key
             for key in self._bootstrap_registry_keys
         }
-        for dev in self.registry.all_by_platform(Platform.CLIMATE):
-            key = dev.key
-            if (
-                key.device_type == DeviceType.THERMOSTAT
-                and key.device_index == 0
-                and key.sub_type == SubType.NONE
-                and 0x00 <= key.room_index <= 0xFE
-            ):
-                keys_by_identity[key.key] = key
+        for device_type, platform in _BOOTSTRAP_PLATFORMS.items():
+            for dev in self.registry.all_by_platform(platform):
+                key = dev.key
+                if key.device_type == device_type and _is_bootstrap_query_key(key):
+                    keys_by_identity[key.key] = key
         keys = [keys_by_identity[identity] for identity in sorted(keys_by_identity)]
         if keys:
             self._bootstrap_scheduled_generation = generation
@@ -462,7 +476,7 @@ class KocomGateway:
             if self.is_device_state_confirmed(key):
                 continue
             if attempt is None:
-                LOGGER.debug("상태가 확인되지 않은 난방에 다시 조회합니다: %s", key)
+                LOGGER.debug("상태가 확인되지 않은 기기에 다시 조회합니다: %s", key)
             elif attempt > 1:
                 LOGGER.debug(
                     "상태 조회를 재시도합니다: %s (시도 %d/%d)",
@@ -562,12 +576,23 @@ class KocomGateway:
 
     @staticmethod
     def _bootstrap_key_from_entity_entry(entity: object) -> DeviceKey | None:
-        """Parse an exact primary thermostat key from a climate registry entry."""
+        """Parse an exact primary thermostat or ventilation key from a
+        climate or fan registry entry."""
         entity_id = getattr(entity, "entity_id", "")
         if not isinstance(entity_id, str):
             return None
         domain, separator, object_id = entity_id.partition(".")
-        if domain != Platform.CLIMATE.value or separator != "." or not object_id:
+        if separator != "." or not object_id:
+            return None
+        device_type = next(
+            (
+                dt
+                for dt, platform in _BOOTSTRAP_PLATFORMS.items()
+                if platform.value == domain
+            ),
+            None,
+        )
+        if device_type is None:
             return None
 
         unique_id = getattr(entity, "unique_id", "")
@@ -576,9 +601,10 @@ class KocomGateway:
         prefix, separator, host = unique_id.partition(":")
         if separator != ":" or not host:
             return None
-        if not prefix.startswith("5-") or not prefix.endswith("_0-0"):
+        type_prefix = f"{int(device_type)}-"
+        if not prefix.startswith(type_prefix) or not prefix.endswith("_0-0"):
             return None
-        room_text = prefix[2:-4]
+        room_text = prefix[len(type_prefix):-4]
         if (
             not room_text
             or len(room_text) > 3
@@ -588,9 +614,9 @@ class KocomGateway:
         ):
             return None
         room = int(room_text)
-        if not 0x00 <= room <= 0xFE or prefix != f"5-{room}_0-0":
+        if not 0x00 <= room <= 0xFE or prefix != f"{int(device_type)}-{room}_0-0":
             return None
-        return DeviceKey(DeviceType.THERMOSTAT, room, 0, SubType.NONE)
+        return DeviceKey(device_type, room, 0, SubType.NONE)
 
     def _notify_pendings(self, dev: DeviceState) -> None:
         if not self._pendings:
