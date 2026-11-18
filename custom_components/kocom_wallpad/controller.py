@@ -26,6 +26,8 @@ from .const import (
     PACKET_PREFIX,
     PACKET_SUFFIX,
     STATUS_QUERY_DEVICE_TYPES,
+    VENTILATION_DEFAULT_ON_SPEED,
+    VENTILATION_SPEEDS,
     DeviceType,
     SubType,
 )
@@ -542,6 +544,10 @@ class KocomController:
             speed = frame.payload[2]
             co2_value = (frame.payload[4] * 100) + frame.payload[5]
             error_code = frame.payload[6]
+            if speed in VENTILATION_SPEEDS:
+                # The unit reports speed 0x00 a few seconds after turning off,
+                # so keep the last real speed for the next turn-on frame.
+                self._device_storage[self._ventilation_speed_storage_key(key)] = speed
 
             if preset_mode != "unknown" and preset_mode != "ventilation":
                 if self._device_storage.get("ventil_modes") is None:
@@ -880,7 +886,7 @@ class KocomController:
         elif device_type in (DeviceType.LIGHT, DeviceType.OUTLET):
             data = self._generate_switch(key, action, data)
         elif device_type == DeviceType.VENTILATION:
-            data = self._generate_ventilation(action, data, **kwargs)
+            data = self._generate_ventilation(key, action, data, **kwargs)
         elif device_type == DeviceType.THERMOSTAT:
             data = self._generate_thermostat(key, action, data, **kwargs)
         elif device_type == DeviceType.AIRCONDITIONER:
@@ -918,7 +924,18 @@ class KocomController:
                 data[idx] = 0xFF if action == "turn_on" else 0x00
         return data
 
-    def _generate_ventilation(self, action: str, data: bytearray, **kwargs: Any) -> bytearray:
+    @staticmethod
+    def _ventilation_speed_storage_key(key: DeviceKey) -> str:
+        return f"{key.unique_id}_vent_speed"
+
+    def _ventilation_on_speed(self, key: DeviceKey) -> int:
+        """Return the speed byte a turn-on frame carries: last seen, else low."""
+        speed = self._device_storage.get(self._ventilation_speed_storage_key(key))
+        return speed if speed in VENTILATION_SPEEDS else VENTILATION_DEFAULT_ON_SPEED
+
+    def _generate_ventilation(
+        self, key: DeviceKey, action: str, data: bytearray, **kwargs: Any
+    ) -> bytearray:
         if action == "set_preset":
             pm = kwargs["preset_mode"]
             data[0] = 0x11
@@ -927,8 +944,11 @@ class KocomController:
             speed = kwargs["speed"]
             data[0] = 0x00 if speed == 0 else 0x11
             data[2] = speed
+        elif action == "turn_on":
+            data[0] = 0x11
+            data[2] = self._ventilation_on_speed(key)
         else:
-            data[0] = 0x11 if action == "turn_on" else 0x00
+            data[0] = 0x00
         return data
 
     def _generate_thermostat(self, key: DeviceKey, action: str, data: bytearray, **kwargs: Any) -> bytearray:
