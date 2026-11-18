@@ -71,6 +71,12 @@ class SubType(IntEnum):
     HUMIDITY = 11
 
 
+# Ventilation speed bytes in ascending order (low, medium, high).
+VENTILATION_SPEEDS = (0x40, 0x80, 0xC0)
+# A turn-on frame must carry a speed: KHN-Q100LT ignores an on frame with
+# speed 0x00 while the unit is off. Used when no speed has been seen yet.
+VENTILATION_DEFAULT_ON_SPEED = 0x40
+
 # Device types that are asked for their state (0x3A) when a connection starts
 # until their own live report arrives. Lights are deliberately excluded: their
 # command path is linked to the entrance cutoff side effect on some models.

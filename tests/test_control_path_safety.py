@@ -796,6 +796,33 @@ class ProtocolFixtureTests(unittest.TestCase):
         self.assertEqual({"error_code": "02"}, first[2].attribute["extra_state"])
         self.assertEqual({"error_code": "00"}, second[2].attribute["extra_state"])
 
+    def test_ventilation_turn_on_carries_last_reported_speed(self):
+        key = DeviceKey(DeviceType.VENTILATION, 0, 0, SubType.NONE)
+        # On at medium (0x80), then off: the off report carries speed 0x00.
+        self.report("vent_on")
+        self.report("vent_off")
+
+        packet, _, _ = self.controller.generate_command(key, "turn_on")
+
+        self.assertEqual(0x00, packet[9])
+        self.assertEqual(bytes((0x11, 0x00, 0x80)), packet[10:13])
+        self.assertEqual(sum(packet[2:18]) & 0xFF, packet[18])
+        # turn_off is unchanged and never carries a speed.
+        off_packet, _, _ = self.controller.generate_command(key, "turn_off")
+        self.assertEqual(bytes(8), off_packet[10:18])
+
+    def test_ventilation_turn_on_ignores_non_speed_report_values(self):
+        key = DeviceKey(DeviceType.VENTILATION, 0, 0, SubType.NONE)
+        for speed in (0x00, 0x10, 0xFF):
+            body = bytes((0x30, 0xBC, 0x00, 0x01, 0x00, 0x48, 0x00, 0x00,
+                          0x11, 0x01, speed, 0x00, 0x00, 0x00, 0x00, 0x00))
+            self.controller._dispatch_packet(
+                b"\xaa\x55" + body + bytes((sum(body) & 0xFF, 0x0D, 0x0D))
+            )
+            with self.subTest(speed=speed):
+                packet, _, _ = self.controller.generate_command(key, "turn_on")
+                self.assertEqual(0x40, packet[12])
+
     def test_consecutive_elevator_direction_and_floor_reports(self):
         for name, expected in (
             ("elevator_down", [True, "downward", "B2"]),
@@ -841,7 +868,8 @@ class ProtocolFixtureTests(unittest.TestCase):
             (DeviceType.AIRCONDITIONER, 2, Platform.CLIMATE, "set_hvac", {"hvac_mode": "off"}, "hvac_mode", "off", "cool", "aa5530bc0039020100000000000000000000280d0d"),
             (DeviceType.AIRCONDITIONER, 2, Platform.CLIMATE, "set_fan", {"fan_mode": "auto"}, "fan_mode", "auto", "low", "aa5530bc00390201000010000400000000003c0d0d"),
             (DeviceType.AIRCONDITIONER, 2, Platform.CLIMATE, "set_temperature", {"target_temp": 23.0}, "target_temp", 23.0, 22.0, "aa5530bc00390201000010000000001700004f0d0d"),
-            (DeviceType.VENTILATION, 0, Platform.FAN, "turn_on", {}, "state", True, False, "aa5530bc0048000100001100000000000000460d0d"),
+            # No speed seen yet: the on frame carries the low speed (0x40).
+            (DeviceType.VENTILATION, 0, Platform.FAN, "turn_on", {}, "state", True, False, "aa5530bc0048000100001100400000000000860d0d"),
             (DeviceType.VENTILATION, 0, Platform.FAN, "turn_off", {}, "state", False, True, "aa5530bc0048000100000000000000000000350d0d"),
             (DeviceType.VENTILATION, 0, Platform.FAN, "set_preset", {"preset_mode": "bypass"}, "preset_mode", "bypass", "auto", "aa5530bc0048000100001103000000000000490d0d"),
             (DeviceType.VENTILATION, 0, Platform.FAN, "set_percentage", {"speed": 192}, "speed", 192, 128, "aa5530bc0048000100001100c00000000000060d0d"),
