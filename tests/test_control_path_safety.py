@@ -474,6 +474,7 @@ _REPORTS = {
     "elevator_down": "aa5530bc0001004400000182000000000000b40d0d",
     "elevator_arrival": "aa5530bc0001004400000331320000000000970d0d",
     "motion_on": "aa5530bc0001006000040000000000000000510d0d",
+    "motion_idle": "aa5530bc0001006000040100000000000000520d0d",
     "motion_off": "aa5530bc00010060000000000000000000004d0d0d",
     "airquality_status": "aa5530bc00010098010023110258012c19328c0d0d",
     "airquality_query": "aa5530bc00010098013a050003200000001e060d0d",
@@ -836,7 +837,13 @@ class ProtocolFixtureTests(unittest.TestCase):
                 self.assertEqual({}, state.attribute)
 
     def test_consecutive_motion_reports(self):
-        for name, expected in (("motion_on", True), ("motion_off", False)):
+        # 04 01 is the idle report captured on KHN-Q100LT; it must not latch the sensor on.
+        for name, expected in (
+            ("motion_on", True),
+            ("motion_idle", False),
+            ("motion_on", True),
+            ("motion_off", False),
+        ):
             states = self.report(name)
             self.assertEqual(1, len(states))
             self.assert_device(states[0], DeviceType.MOTION, 0, SubType.NONE, Platform.BINARY_SENSOR)
@@ -1454,6 +1461,19 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         self.gateway.on_device_state(state)
         self.assertTrue(self.gateway.is_device_available(state.key))
         self.assertTrue(self.gateway.is_device_state_confirmed(state.key))
+
+    async def test_restored_motion_starts_off(self):
+        key = DeviceKey(DeviceType.MOTION, 0, 0, SubType.NONE)
+        self.gateway._restore_mode = True
+        self.gateway.on_device_state(
+            DeviceState(key, Platform.BINARY_SENSOR, {"device_class": "motion"}, True)
+        )
+        self.gateway._restore_mode = False
+        self.assertIs(False, self.gateway.registry.get(key).state)
+        self.gateway.on_device_state(
+            DeviceState(key, Platform.BINARY_SENSOR, {"device_class": "motion"}, True)
+        )
+        self.assertIs(True, self.gateway.registry.get(key).state)
 
     async def test_reconnect_requires_a_new_live_packet(self):
         state = self._state(True)

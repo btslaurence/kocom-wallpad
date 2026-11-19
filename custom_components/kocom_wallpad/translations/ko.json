@@ -137,7 +137,7 @@
                 "name": "일괄소등 {id}"
             },
             "motion": {
-                "name": "움직임 감지기(현관) {id}"
+                "name": "현관 사람 감지 {id}"
             },
             "thermostat-errcode": {
                 "name": "보일러 오류코드 {id}"
