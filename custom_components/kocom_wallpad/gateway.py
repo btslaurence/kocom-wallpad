@@ -330,6 +330,9 @@ class KocomGateway:
 
     def is_device_available(self, key: DeviceKey) -> bool:
         """A restored state is display-only until a live packet confirms it."""
+        if key.device_type == DeviceType.MOTION:
+            # 0x60 reports only while someone is at the door; silence means "clear".
+            return self.is_transport_available()
         return self.is_transport_available() and self.is_device_state_confirmed(key)
 
     def is_transport_available(self) -> bool:
@@ -354,6 +357,10 @@ class KocomGateway:
             self._live_device_keys.clear()
             self._primary_report_times.clear()
             self._cancel_bootstrap_queries_soon()
+            # A "clear" report may be lost while disconnected; restart from clear.
+            for dev in self.registry.by_platform.get(Platform.BINARY_SENSOR, {}).values():
+                if dev.key.device_type == DeviceType.MOTION:
+                    dev.state = False
         self._connection_available = connected
         if connected:
             self._schedule_bootstrap_queries()
