@@ -283,7 +283,10 @@ class KocomGateway:
                 item.future.set_result(False)
             raise
 
-    def on_device_state(self, dev: DeviceState) -> None:  
+    def on_device_state(self, dev: DeviceState) -> None:
+        if self._restore_mode and dev.key.device_type == DeviceType.MOTION:
+            # Activity is a short pulse; a stored "on" would be stale after restart.
+            dev.state = False
         is_live = not self._restore_mode and self.conn._is_connected()
         if is_live and self._is_primary_thermostat(dev):
             self._primary_report_times[dev.key.key] = monotonic()

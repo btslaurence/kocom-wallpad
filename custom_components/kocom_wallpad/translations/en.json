@@ -137,7 +137,7 @@
                 "name": "일괄소등 {id}"
             },
             "motion": {
-                "name": "Motion Sensor(door) {id}"
+                "name": "Entrance activity {id}"
             },
             "thermostat-errcode": {
                 "name": "Boiler Error Code {id}"

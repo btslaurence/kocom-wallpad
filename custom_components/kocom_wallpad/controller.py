@@ -687,7 +687,8 @@ class KocomController:
             attribute = {
                 "device_class": BinarySensorDeviceClass.MOTION
             }
-            state = frame.command == 0x04
+            # KHN-Q100LT bus capture: idle is reported as 04 01, activity as 04 00.
+            state = frame.command == 0x04 and frame.payload[0] == 0x00
             dev = DeviceState(key=key, platform=Platform.BINARY_SENSOR, attribute=attribute, state=state)
             return dev
         
