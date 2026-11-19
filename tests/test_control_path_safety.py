@@ -1475,6 +1475,46 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIs(True, self.gateway.registry.get(key).state)
 
+    async def test_motion_is_available_without_a_live_report(self):
+        key = DeviceKey(DeviceType.MOTION, 0, 0, SubType.NONE)
+        self.gateway._sync_connection_availability()
+        self.gateway._restore_mode = True
+        self.gateway.on_device_state(
+            DeviceState(key, Platform.BINARY_SENSOR, {"device_class": "motion"}, True)
+        )
+        self.gateway._restore_mode = False
+        self.assertFalse(self.gateway.is_device_state_confirmed(key))
+        self.assertTrue(self.gateway.is_device_available(key))
+        self.assertIs(False, self.gateway.registry.get(key).state)
+
+        self.connection.connected = False
+        self.gateway._sync_connection_availability()
+        self.assertFalse(self.gateway.is_device_available(key))
+
+    async def test_motion_clears_when_the_connection_drops(self):
+        key = DeviceKey(DeviceType.MOTION, 0, 0, SubType.NONE)
+        light = self._state(True)
+        self.gateway._sync_connection_availability()
+        self.gateway.on_device_state(light)
+        self.gateway.on_device_state(
+            DeviceState(key, Platform.BINARY_SENSOR, {"device_class": "motion"}, True)
+        )
+        self.assertIs(True, self.gateway.registry.get(key).state)
+
+        self.connection.connected = False
+        self.gateway._sync_connection_availability()
+        self.connection.connected = True
+        self.gateway._sync_connection_availability()
+        self.assertTrue(self.gateway.is_device_available(key))
+        self.assertIs(False, self.gateway.registry.get(key).state)
+        self.assertIs(True, self.gateway.registry.get(light.key).state)
+        self.assertFalse(self.gateway.is_device_available(light.key))
+
+        self.gateway.on_device_state(
+            DeviceState(key, Platform.BINARY_SENSOR, {"device_class": "motion"}, True)
+        )
+        self.assertIs(True, self.gateway.registry.get(key).state)
+
     async def test_reconnect_requires_a_new_live_packet(self):
         state = self._state(True)
         self.gateway._sync_connection_availability()
