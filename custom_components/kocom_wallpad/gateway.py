@@ -40,6 +40,7 @@ from .transport import AsyncConnection
 _BOOTSTRAP_PLATFORMS: dict[DeviceType, Platform] = {
     DeviceType.THERMOSTAT: Platform.CLIMATE,
     DeviceType.VENTILATION: Platform.FAN,
+    DeviceType.LIGHT: Platform.LIGHT,
 }
 
 
@@ -51,6 +52,14 @@ def _is_bootstrap_query_key(key: DeviceKey) -> bool:
         and key.sub_type == SubType.NONE
         and 0x00 <= key.room_index <= 0xFE
     )
+
+
+def _bootstrap_query_key(key: DeviceKey) -> DeviceKey | None:
+    """Return the key whose live report answers this device's status query."""
+    if key.device_type == DeviceType.LIGHT and key.sub_type == SubType.NONE:
+        # One report carries every light of a room, so each room is asked once.
+        key = DeviceKey(DeviceType.LIGHT, key.room_index, 0, SubType.NONE)
+    return key if _is_bootstrap_query_key(key) else None
 
 
 @dataclass(slots=True)
@@ -411,7 +420,7 @@ class KocomGateway:
 
     def _schedule_bootstrap_queries(self) -> None:
         """Start one query task per socket session for every known primary
-        thermostat and ventilation unit."""
+        thermostat, ventilation unit and light room."""
         generation = self._connection_generation
         if self._bootstrap_scheduled_generation == generation:
             return
@@ -423,10 +432,16 @@ class KocomGateway:
         }
         for device_type, platform in _BOOTSTRAP_PLATFORMS.items():
             for dev in self.registry.all_by_platform(platform):
-                key = dev.key
-                if key.device_type == device_type and _is_bootstrap_query_key(key):
+                if dev.key.device_type != device_type:
+                    continue
+                key = _bootstrap_query_key(dev.key)
+                if key is not None:
                     keys_by_identity[key.key] = key
-        keys = [keys_by_identity[identity] for identity in sorted(keys_by_identity)]
+        # Lights go last so thermostat and ventilation keep their first turns.
+        keys = sorted(
+            keys_by_identity.values(),
+            key=lambda key: (key.device_type == DeviceType.LIGHT, key.key),
+        )
         if keys:
             self._bootstrap_scheduled_generation = generation
             task = asyncio.create_task(
@@ -445,8 +460,10 @@ class KocomGateway:
 
         First round: every unanswered room's first query goes out before any
         retry, then still-unanswered rooms are retried, up to SEND_RETRY_MAX
-        tries per room. After that, each still-unanswered room gets one try
-        every BOOTSTRAP_REQUERY_INTERVAL seconds while the session lasts.
+        tries per room. After that, each still-unanswered thermostat or
+        ventilation room gets one try every BOOTSTRAP_REQUERY_INTERVAL seconds
+        while the session lasts. Light rooms are not re-asked: a light module
+        that ignores the query stays unconfirmed until its next own report.
         """
         try:
             for attempt in range(1, SEND_RETRY_MAX + 1):
@@ -484,6 +501,8 @@ class KocomGateway:
             if not self._is_bootstrap_session(connection_generation):
                 return False
             if self.is_device_state_confirmed(key):
+                continue
+            if attempt is None and key.device_type == DeviceType.LIGHT:
                 continue
             if attempt is None:
                 LOGGER.debug("상태가 확인되지 않은 기기에 다시 조회합니다: %s", key)
@@ -586,8 +605,8 @@ class KocomGateway:
 
     @staticmethod
     def _bootstrap_key_from_entity_entry(entity: object) -> DeviceKey | None:
-        """Parse an exact primary thermostat or ventilation key from a
-        climate or fan registry entry."""
+        """Parse an exact primary thermostat, ventilation or light-room key
+        from a climate, fan or light registry entry."""
         entity_id = getattr(entity, "entity_id", "")
         if not isinstance(entity_id, str):
             return None
@@ -612,9 +631,16 @@ class KocomGateway:
         if separator != ":" or not host:
             return None
         type_prefix = f"{int(device_type)}-"
-        if not prefix.startswith(type_prefix) or not prefix.endswith("_0-0"):
+        if not prefix.startswith(type_prefix):
             return None
-        room_text = prefix[len(type_prefix):-4]
+        room_text, separator, index_text = prefix[len(type_prefix):].partition("_")
+        if device_type == DeviceType.LIGHT:
+            # Any of a room's lights seeds that room's single query.
+            valid_indexes = {f"{index}-0" for index in range(8)}
+        else:
+            valid_indexes = {"0-0"}
+        if separator != "_" or index_text not in valid_indexes:
+            return None
         if (
             not room_text
             or len(room_text) > 3
@@ -624,7 +650,7 @@ class KocomGateway:
         ):
             return None
         room = int(room_text)
-        if not 0x00 <= room <= 0xFE or prefix != f"{int(device_type)}-{room}_0-0":
+        if not 0x00 <= room <= 0xFE or prefix != f"{int(device_type)}-{room}_{index_text}":
             return None
         return DeviceKey(device_type, room, 0, SubType.NONE)
 
