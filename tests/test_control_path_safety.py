@@ -368,13 +368,25 @@ class ControllerSafetyTests(unittest.TestCase):
                 "status_query",
             )
 
+    def test_light_status_query_has_exact_directed_frame_and_checksum(self):
+        controller = KocomController(_ControllerGateway())
+
+        packet, _, _ = controller.generate_command(
+            DeviceKey(DeviceType.LIGHT, 3, 0, SubType.NONE), "status_query"
+        )
+
+        self.assertEqual(
+            bytes.fromhex("aa5530bc000e0301003a0000000000000000380d0d"), packet
+        )
+        self.assertEqual(sum(packet[2:18]) % 256, packet[18])
+
     def test_status_query_and_unknown_thermostat_actions_are_rejected(self):
         controller = KocomController(_ControllerGateway())
         thermostat = DeviceKey(DeviceType.THERMOSTAT, 1, 0, SubType.NONE)
-        light = DeviceKey(DeviceType.LIGHT, 1, 0, SubType.NONE)
+        outlet = DeviceKey(DeviceType.OUTLET, 1, 0, SubType.NONE)
 
         with self.assertRaises(ValueError):
-            controller.generate_command(light, "status_query")
+            controller.generate_command(outlet, "status_query")
         with self.assertRaises(ValueError):
             controller.generate_command(thermostat, "unsupported")
         with self.assertRaises(ValueError):
@@ -1709,6 +1721,110 @@ class GatewaySafetyTests(unittest.IsolatedAsyncioTestCase):
             self.connection.sent,
         )
         self.assertFalse(self.gateway.is_device_state_confirmed(vent_key))
+
+    def _restore_lights(self, *keys: tuple[int, int]) -> None:
+        self.gateway._restore_mode = True
+        for room, index in keys:
+            self.gateway.on_device_state(
+                DeviceState(DeviceKey(DeviceType.LIGHT, room, index, SubType.NONE), Platform.LIGHT, {}, True)
+            )
+        self.gateway._restore_mode = False
+
+    async def test_bootstrap_asks_each_light_room_once_after_thermostats(self):
+        self._restore_thermostats(1)
+        self._restore_lights((3, 0), (3, 2), (4, 1))
+        interval = 0.05
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+
+        with patch.object(gateway_module, "BOOTSTRAP_REQUERY_INTERVAL", interval):
+            self.gateway._sync_connection_availability()
+            await self._wait_for_sent(9)
+            await self._settle()
+            first_round = list(self.connection.sent)
+            await self._wait_for_sent(10)
+            await asyncio.sleep(interval * 2.5)
+
+        query_light_3 = bytes.fromhex("aa5530bc000e0301003a0000000000000000380d0d")
+        query_light_4 = bytes.fromhex("aa5530bc000e0401003a0000000000000000390d0d")
+        self.assertEqual(
+            [bytes.fromhex("aa5530bc00360101003a00000000000000005e0d0d"),
+             query_light_3, query_light_4] * 3,
+            first_round,
+        )
+        # Re-asking continues for the thermostat only.
+        later = self.connection.sent[9:]
+        self.assertTrue(later)
+        self.assertTrue(all(packet[5] == 0x36 for packet in later), later)
+        for room, index in ((3, 0), (3, 2), (4, 1)):
+            key = DeviceKey(DeviceType.LIGHT, room, index, SubType.NONE)
+            self.assertFalse(self.gateway.is_device_available(key))
+
+    async def test_light_room_report_answers_query_and_confirms_all_its_lights(self):
+        self._restore_lights((3, 0), (3, 2))
+        reports = {3: bytes((0xFF, 0, 0, 0, 0, 0, 0, 0))}
+
+        def answer(packet: bytes) -> None:
+            if packet[5] == 0x0E and packet[9] == 0x3A:
+                ack = bytearray(packet)
+                ack[3] = 0xDC
+                ack[5:7], ack[7:9] = packet[7:9], packet[5:7]
+                ack[18] = sum(ack[2:18]) % 256
+                # The query's own ACK does not confirm anything by itself.
+                self.gateway.controller.feed(bytes(ack))
+                self.assertFalse(
+                    self.gateway.is_device_state_confirmed(
+                        DeviceKey(DeviceType.LIGHT, packet[6], 0, SubType.NONE)
+                    )
+                )
+                self.gateway.controller.feed(_light_report(packet[6], reports[packet[6]]))
+
+        self.connection.on_send = answer
+        self.gateway._task_sender = asyncio.create_task(self.gateway._sender_loop())
+        self.gateway._sync_connection_availability()
+        await self._wait_for_bootstrap()
+
+        self.assertEqual(
+            [bytes.fromhex("aa5530bc000e0301003a0000000000000000380d0d")],
+            self.connection.sent,
+        )
+        first = DeviceKey(DeviceType.LIGHT, 3, 0, SubType.NONE)
+        third = DeviceKey(DeviceType.LIGHT, 3, 2, SubType.NONE)
+        self.assertTrue(self.gateway.is_device_available(first))
+        self.assertTrue(self.gateway.is_device_available(third))
+        first_state = self.gateway.registry.get(first)
+        third_state = self.gateway.registry.get(third)
+        assert first_state is not None and third_state is not None
+        self.assertIs(True, first_state.state)
+        self.assertIs(False, third_state.state)
+
+    async def test_registry_light_entries_seed_one_query_per_room(self):
+        valid = [
+            types.SimpleNamespace(entity_id="light.room_3_main", unique_id="1-3_0-0:test"),
+            types.SimpleNamespace(entity_id="light.room_3_side", unique_id="1-3_2-0:test"),
+            types.SimpleNamespace(entity_id="light.room_4_side", unique_id="1-4_1-0:test"),
+        ]
+        invalid = [
+            types.SimpleNamespace(entity_id="light.index_8", unique_id="1-5_8-0:test"),
+            types.SimpleNamespace(entity_id="light.subtype", unique_id="1-5_0-1:test"),
+            types.SimpleNamespace(entity_id="light.broadcast", unique_id="1-255_0-0:test"),
+            types.SimpleNamespace(entity_id="light.leading_zero", unique_id="1-05_0-0:test"),
+            types.SimpleNamespace(entity_id="light.alias", unique_id="1-5_0-0-extra:test"),
+            types.SimpleNamespace(entity_id="light.outlet", unique_id="4-5_0-0:test"),
+            types.SimpleNamespace(entity_id="switch.light_prefix", unique_id="1-5_0-0:test"),
+            types.SimpleNamespace(entity_id="binary_sensor.cutoff", unique_id="2-255_0-0:test"),
+        ]
+        await self._restore_entity_entries(
+            [*valid, *invalid],
+            {entry.entity_id: types.SimpleNamespace(extra_data=None) for entry in valid + invalid},
+        )
+
+        self.assertEqual(
+            {
+                DeviceKey(DeviceType.LIGHT, 3, 0, SubType.NONE),
+                DeviceKey(DeviceType.LIGHT, 4, 0, SubType.NONE),
+            },
+            self.gateway._bootstrap_registry_keys,
+        )
 
     async def test_packet_and_registry_bootstrap_keys_are_deduplicated(self):
         room = 2
@@ -3104,7 +3220,8 @@ class OriginalCommandReliabilityTests(unittest.IsolatedAsyncioTestCase):
                     release.set()
                     results = await asyncio.wait_for(asyncio.gather(first, second), 0.5)
                 self.assertEqual([False, False], results)
-                self.assertEqual([], self.connection.sent)
+                # A reconnect may ask the light room for its state; no command goes out.
+                self.assertEqual([], [p for p in self.connection.sent if p[9] != 0x3A])
                 self.gateway._stopping = False
                 self.connection.connected = True
                 self.gateway._sync_connection_availability()

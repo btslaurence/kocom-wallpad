@@ -78,6 +78,9 @@ VENTILATION_SPEEDS = (0x40, 0x80, 0xC0)
 VENTILATION_DEFAULT_ON_SPEED = 0x40
 
 # Device types that are asked for their state (0x3A) when a connection starts
-# until their own live report arrives. Lights are deliberately excluded: their
-# command path is linked to the entrance cutoff side effect on some models.
-STATUS_QUERY_DEVICE_TYPES = frozenset({DeviceType.THERMOSTAT, DeviceType.VENTILATION})
+# until their own live report arrives. Lights are asked once per room and are
+# not re-asked; a query carries no on/off value, so it does not go through the
+# light command path that the optional cutoff release follows.
+STATUS_QUERY_DEVICE_TYPES = frozenset(
+    {DeviceType.THERMOSTAT, DeviceType.VENTILATION, DeviceType.LIGHT}
+)
